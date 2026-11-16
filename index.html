@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2048</title>
+<style>
+* { box-sizing: border-box }
+:root { color-scheme: light; --bg:#f7f4ed; --ink:#232820; --muted:#535b50; --panel:#fffdf7; --grid:#d9ded1; --cell:#c8d0c0; --accent:#205b43 }
+:root[data-theme=dark] { color-scheme:dark; --bg:#171d19; --ink:#f0f3e8; --muted:#bec9bc; --panel:#262e28; --grid:#344139; --cell:#435249; --accent:#266a4d }
+body { margin:0; background:var(--bg); color:var(--ink); font:16px system-ui,sans-serif }
+main { width:min(100% - 32px, 460px); margin:clamp(20px,7vh,75px) auto }
+header,.toolbar,.scores { display:flex; gap:8px; align-items:center; justify-content:space-between }
+h1 { font-size:clamp(54px,13vw,92px); letter-spacing:-.09em; margin:0; line-height:1 }
+.score { min-width:66px; padding:8px; background:var(--panel); border-radius:12px; text-align:center; font-variant-numeric:tabular-nums }
+.score small { display:block; color:var(--muted) }
+.score strong { font-size:1.25rem }
+p { color:var(--muted); line-height:1.5 }
+.toolbar { justify-content:flex-start; margin:16px 0 }
+button { font:inherit; font-weight:650; border:0; border-radius:9px; padding:9px 12px; background:var(--panel); color:var(--ink); cursor:pointer }
+button:disabled { opacity:.5; cursor:default }
+button:focus-visible { outline:3px solid #a97b29; outline-offset:3px }
+.primary { background:var(--accent); color:white }
+#theme { margin-left:auto }
+#board { --gap:clamp(6px,2vw,11px); position:relative; aspect-ratio:1; border-radius:18px; background:var(--grid); touch-action:none; user-select:none }
+.layer { position:absolute; inset:var(--gap); display:grid; grid-template:repeat(4,1fr)/repeat(4,1fr); gap:var(--gap) }
+.cell,.tile { border-radius:10px; min-width:0 }
+.cell { background:var(--cell) }
+.tile { display:grid; place-items:center; font-size:clamp(18px,7vw,39px); font-weight:800; letter-spacing:-.05em; background:#263f33; color:white }
+.tile.long { font-size:clamp(15px,5vw,29px) }
+.tile[data-value="2"] { background:#fcf8e9; color:#303a2c }
+.tile[data-value="4"] { background:#e5edce; color:#303a2c }
+.tile[data-value="8"] { background:#bad9ad; color:#233725 }
+.tile[data-value="16"] { background:#89bd94; color:#182f22 }
+.tile[data-value="32"] { background:#4c8d6a; color:#0c2217 }
+.tile[data-value="64"] { background:#27674d }
+.tile[data-value="128"] { background:#f3d68a; color:#392c16 }
+.tile[data-value="256"] { background:#e8b761; color:#392c16 }
+.tile[data-value="512"] { background:#d99c44; color:#2d210e }
+.tile[data-value="1024"] { background:#925822 }
+.tile[data-value="2048"] { background:#6d4317; color:#fff3c4 }
+dialog { max-width:calc(100vw - 32px); padding:24px; border:0; border-radius:18px; background:var(--panel); color:var(--ink); text-align:center; box-shadow:0 16px 60px #0004 }
+dialog::backdrop { background:#121711b0 }
+dialog h2 { margin-top:0 }
+dialog button { margin:3px }
+.visually-hidden { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap }
+</style>
+<main>
+  <header>
+    <h1>2048</h1>
+    <div class="scores">
+      <div class="score"><small>Счёт</small><strong id="score">0</strong></div>
+      <div class="score"><small>Рекорд</small><strong id="best">0</strong></div>
+    </div>
+  </header>
+  <p>Соединяйте одинаковые плитки, чтобы собрать 2048.</p>
+  <div class="toolbar">
+    <button class="primary" id="restart" aria-label="Начать новую игру">Новая игра</button>
+    <button id="undo" aria-label="Отменить последний ход">Отменить</button>
+    <button id="theme" aria-label="Тёмная тема" aria-pressed="false">Тема</button>
+  </div>
+  <div id="board" role="group" aria-label="Игровое поле 4 на 4">
+    <div class="layer" id="cells" aria-hidden="true"></div>
+    <div class="layer" id="tiles" aria-hidden="true"></div>
+  </div>
+  <p>Управление: стрелки, WASD или свайп по полю.</p>
+  <div id="status" class="visually-hidden" role="status"></div>
+</main>
+<dialog id="result" aria-labelledby="result-title">
+  <h2 id="result-title"></h2>
+  <p id="result-score"></p>
+  <button id="continue" class="primary" aria-label="Продолжить игру">Продолжить</button>
+  <button id="result-undo" aria-label="Отменить последний ход">Отменить ход</button>
+  <button id="result-restart" aria-label="Начать новую игру">Новая игра</button>
+</dialog>
+<script>
+(() => {
+  'use strict';
+
+  const size = 4;
+  const historyLimit = 20;
+  const storageKey = '2048.game.v1';
+  const directions = ['left', 'right', 'up', 'down'];
+
+  function slide(line) {
+    return line.filter(entry => entry.value !== 0);
+  }
+
+  function merge(line) {
+    const groups = [];
+    let gained = 0;
+    for (let index = 0; index < line.length; index += 1) {
+      const first = line[index];
+      const second = line[index + 1];
+      if (first.value === second?.value) {
+        const value = first.value * 2;
+        groups.push({ value, sources: [first.index, second.index] });
+        gained += value;
+        index += 1;
+      } else {
+        groups.push({ value: first.value, sources: [first.index] });
+      }
+    }
+    return { groups, gained };
+  }
+
+  function move(board, direction) {
+    const next = Array(size * size).fill(0);
+    const motions = [];
+    let points = 0;
+
+    // Traverse every line from the edge that receives the tiles.
+    for (let line = 0; line < size; line += 1) {
+      const positions = Array.from({ length: size }, (_, offset) => {
+        const step = direction === 'right' || direction === 'down' ? size - 1 - offset : offset;
+        return direction === 'left' || direction === 'right'
+          ? line * size + step
+          : step * size + line;
+      });
+      const entries = positions.map(index => ({ index, value: board[index] }));
+      const { groups, gained } = merge(slide(entries));
+      points += gained;
+
+      slide(groups).forEach(({ value, sources }, offset) => {
+        const target = positions[offset];
+        next[target] = value;
+        motions.push({ target, sources });
+      });
+    }
+
+    return { board: next, points, motions, changed: next.some((value, index) => value !== board[index]) };
+  }
+
+  function canMove(board) {
+    return directions.some(direction => move(board, direction).changed);
+  }
+
+  function spawnTile(board, positionRoll, valueRoll) {
+    const empty = board.flatMap((value, index) => value === 0 ? [index] : []);
+    if (!empty.length) return { board: board.slice(), index: -1 };
+    const index = empty[Math.floor(positionRoll * empty.length)];
+    const next = board.slice();
+    next[index] = valueRoll < 0.9 ? 2 : 4;
+    return { board: next, index };
+  }
+
+  function randomSpawn(board) {
+    return spawnTile(board, Math.random(), Math.random());
+  }
+
+  function freshGame() {
+    const first = randomSpawn(Array(size * size).fill(0));
+    return { board: randomSpawn(first.board).board, score: 0, continued: false };
+  }
+
+  function validFrame(frame) {
+    return Array.isArray(frame?.board) && frame.board.length === size * size &&
+      frame.board.every(value => value === 0 ||
+        (Number.isSafeInteger(value) && value >= 2 && Number.isInteger(Math.log2(value)))) &&
+      frame.board.some(Boolean) && Number.isSafeInteger(frame.score) && frame.score >= 0 &&
+      typeof frame.continued === 'boolean';
+  }
+
+  function load() {
+    try {
+      return JSON.parse(localStorage.getItem(storageKey)) ?? {};
+    } catch {
+      return {};
+    }
+  }
+
+  const saved = load();
+  let game = validFrame(saved.game) ? saved.game : freshGame();
+  let history = validFrame(saved.game) && Array.isArray(saved.history)
+    ? saved.history.filter(validFrame).slice(-historyLimit)
+    : [];
+  let best = Math.max(game.score, Number.isSafeInteger(saved.best) ? saved.best : 0);
+  const themePreference = matchMedia('(prefers-color-scheme: dark)');
+  let theme = ['dark', 'light'].includes(saved.theme) ? saved.theme : null;
+
+  function save() {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify({ game, history, best, theme }));
+    } catch {
+      // The game remains playable when browser storage is blocked or full.
+    }
+  }
+
+  const element = id => document.getElementById(id);
+  const board = element('board');
+  const tiles = element('tiles');
+  const dialog = element('result');
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  let animation = null;
+
+  for (let index = 0; index < size * size; index += 1) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    element('cells').append(cell);
+  }
+
+  function drawTiles(values) {
+    const fragment = document.createDocumentFragment();
+    const nodes = new Map();
+    values.forEach((value, index) => {
+      if (!value) return;
+      const tile = document.createElement('div');
+      tile.className = String(value).length > 4 ? 'tile long' : 'tile';
+      tile.dataset.value = value;
+      tile.textContent = value;
+      tile.style.gridArea = `${Math.floor(index / size) + 1} / ${index % size + 1}`;
+      nodes.set(index, tile);
+      fragment.append(tile);
+    });
+    tiles.replaceChildren(fragment);
+    return nodes;
+  }
+
+  function render(previous, transition, spawned) {
+    animation?.abort();
+    const controller = new AbortController();
+    animation = controller;
+    element('score').textContent = game.score;
+    element('best').textContent = best;
+    element('undo').disabled = history.length === 0;
+    const rows = Array.from({ length: size }, (_, row) =>
+      game.board.slice(row * size, (row + 1) * size).map(value => value || 'пусто').join(', '));
+    element('status').textContent = `Счёт ${game.score}. Поле: ${rows.join(' / ')}.`;
+
+    const win = !game.continued && game.board.includes(2048);
+    const over = !canMove(game.board);
+
+    function finish() {
+      if (controller.signal.aborted) return;
+      const nodes = drawTiles(game.board);
+      if (transition && !reducedMotion.matches) {
+        const merged = transition.motions.filter(item => item.sources.length === 2);
+        for (const { target } of merged) {
+          nodes.get(target).animate([
+            { transform: 'scale(.92)' }, { transform: 'scale(1.12)' }, { transform: 'scale(1)' }
+          ], 155);
+        }
+        nodes.get(spawned)?.animate([
+          { transform: 'scale(.4)', opacity: 0 }, { transform: 'scale(1)', opacity: 1 }
+        ], 145);
+      }
+      if (win || over) {
+        element('result-title').textContent = win ? 'Вы собрали 2048!' : 'Ходов больше нет';
+        element('result-score').textContent = `Счёт: ${game.score}`;
+        element('continue').hidden = !win;
+        element('result-undo').hidden = win || history.length === 0;
+        if (!dialog.open) dialog.showModal();
+      } else if (dialog.open) {
+        dialog.close();
+      }
+    }
+
+    if (!transition || reducedMotion.matches) {
+      finish();
+      return;
+    }
+
+    const nodes = drawTiles(previous);
+    const step = element('cells').children[1].offsetLeft - element('cells').children[0].offsetLeft;
+    const slides = transition.motions.flatMap(({ target, sources }) => sources.map(source => {
+      const dx = (target % size - source % size) * step;
+      const dy = (Math.floor(target / size) - Math.floor(source / size)) * step;
+      return nodes.get(source).animate([
+        { transform: 'translate(0, 0)' }, { transform: `translate(${dx}px, ${dy}px)` }
+      ], { duration: 105, easing: 'ease-out', fill: 'forwards' });
+    }));
+    controller.signal.addEventListener('abort', () => slides.forEach(slide => slide.cancel()), { once: true });
+    Promise.allSettled(slides.map(slide => slide.finished)).then(finish);
+  }
+
+  function play(direction) {
+    if (dialog.open || (!game.continued && game.board.includes(2048))) return;
+    const transition = move(game.board, direction);
+    if (!transition.changed) return;
+    const previous = game;
+    const spawned = randomSpawn(transition.board);
+    history = [...history, previous].slice(-historyLimit);
+    game = { ...previous, board: spawned.board, score: previous.score + transition.points };
+    best = Math.max(best, game.score);
+    save();
+    render(previous.board, transition, spawned.index);
+  }
+
+  function restart() {
+    history = [];
+    game = freshGame();
+    save();
+    render();
+  }
+
+  function undo() {
+    if (!history.length) return;
+    game = history.pop();
+    save();
+    render();
+  }
+
+  function applyTheme() {
+    const active = theme ?? (themePreference.matches ? 'dark' : 'light');
+    document.documentElement.dataset.theme = active;
+    element('theme').setAttribute('aria-pressed', String(active === 'dark'));
+  }
+
+  const keys = new Map([
+    ['ArrowLeft', 'left'], ['ArrowRight', 'right'], ['ArrowUp', 'up'], ['ArrowDown', 'down'],
+    ['KeyA', 'left'], ['KeyD', 'right'], ['KeyW', 'up'], ['KeyS', 'down']
+  ]);
+
+  document.addEventListener('keydown', event => {
+    const direction = keys.get(event.code);
+    if (!direction || dialog.open || event.ctrlKey || event.altKey || event.metaKey) return;
+    event.preventDefault();
+    play(direction);
+  });
+
+  let touch = null;
+  board.addEventListener('pointerdown', event => {
+    if (event.pointerType === 'mouse' || !event.isPrimary) return;
+    touch = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    board.setPointerCapture(event.pointerId);
+  });
+  board.addEventListener('pointerup', event => {
+    if (touch?.id !== event.pointerId) return;
+    const dx = event.clientX - touch.x;
+    const dy = event.clientY - touch.y;
+    touch = null;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+    play(Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
+  });
+  board.addEventListener('lostpointercapture', event => {
+    if (touch?.id === event.pointerId) touch = null;
+  });
+
+  element('undo').addEventListener('click', undo);
+  element('result-undo').addEventListener('click', undo);
+  element('restart').addEventListener('click', restart);
+  element('result-restart').addEventListener('click', restart);
+  element('continue').addEventListener('click', () => {
+    game = { ...game, continued: true };
+    save();
+    render();
+  });
+  dialog.addEventListener('cancel', event => event.preventDefault());
+  element('theme').addEventListener('click', () => {
+    theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    applyTheme();
+    save();
+  });
+  themePreference.addEventListener('change', applyTheme);
+  applyTheme();
+  save();
+  render();
+})();
+</script>
+</html>
