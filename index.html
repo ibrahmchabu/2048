@@ -15,12 +15,18 @@ h1 { font-size:clamp(54px,13vw,92px); letter-spacing:-.09em; margin:0; line-heig
 .score small { display:block; color:var(--muted) }
 .score strong { font-size:1.25rem }
 p { color:var(--muted); line-height:1.5 }
-.toolbar { justify-content:flex-start; margin:16px 0 }
+.toolbar { flex-wrap:wrap; justify-content:flex-start; margin:16px 0 }
 button { font:inherit; font-weight:650; border:0; border-radius:9px; padding:9px 12px; background:var(--panel); color:var(--ink); cursor:pointer }
 button:disabled { opacity:.5; cursor:default }
 button:focus-visible { outline:3px solid #a97b29; outline-offset:3px }
 .primary { background:var(--accent); color:white }
 #theme { margin-left:auto }
+.modes { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 0 }
+.modes a { color:var(--ink); padding:8px 12px; border-radius:9px; background:var(--panel); text-decoration:none; font-weight:650 }
+.modes a[aria-current] { background:var(--accent); color:white }
+#feedback { min-height:1.5em; margin:0 }
+#stats-list { display:grid; grid-template-columns:1fr auto; gap:12px 20px; text-align:left }
+#stats-list dd { margin:0; font-weight:750; text-align:right }
 #board { --gap:clamp(6px,2vw,11px); position:relative; aspect-ratio:1; border-radius:18px; background:var(--grid); touch-action:none; user-select:none }
 .layer { position:absolute; inset:var(--gap); display:grid; grid-template:repeat(4,1fr)/repeat(4,1fr); gap:var(--gap) }
 .cell,.tile { border-radius:10px; min-width:0 }
@@ -53,6 +59,11 @@ dialog button { margin:3px }
     </div>
   </header>
   <p>Соединяйте одинаковые плитки, чтобы собрать 2048.</p>
+  <nav class="modes" aria-label="Режим игры">
+    <a id="classic" href="./">Классика</a>
+    <a id="daily">Испытание дня</a>
+  </nav>
+  <p id="daily-date" hidden></p>
   <div class="toolbar">
     <button class="primary" id="restart" aria-label="Начать новую игру">Новая игра</button>
     <button id="undo" aria-label="Отменить последний ход">Отменить</button>
@@ -62,9 +73,19 @@ dialog button { margin:3px }
     <div class="layer" id="cells" aria-hidden="true"></div>
     <div class="layer" id="tiles" aria-hidden="true"></div>
   </div>
+  <div class="toolbar">
+    <button id="share" aria-label="Поделиться результатом">Поделиться</button>
+    <button id="stats" aria-label="Открыть личную статистику">Статистика</button>
+  </div>
+  <p id="feedback" role="status"></p>
   <p>Управление: стрелки, WASD или свайп по полю.</p>
   <div id="status" class="visually-hidden" role="status"></div>
 </main>
+<dialog id="statistics" aria-labelledby="statistics-title">
+  <h2 id="statistics-title">Личная статистика</h2>
+  <dl id="stats-list"></dl>
+  <form method="dialog"><button aria-label="Закрыть статистику">Закрыть</button></form>
+</dialog>
 <dialog id="result" aria-labelledby="result-title">
   <h2 id="result-title"></h2>
   <p id="result-score"></p>
@@ -79,6 +100,13 @@ dialog button { margin:3px }
   const size = 4;
   const historyLimit = 20;
   const storageKey = '2048.game.v1';
+  const utcDay = (date = new Date()) => date.toISOString().slice(0, 10);
+  const requestedDay = new URLSearchParams(location.search).get('daily');
+  const validDay = day => /^\d{4}-\d{2}-\d{2}$/.test(day ?? '') &&
+    !Number.isNaN(Date.parse(day)) && utcDay(new Date(day)) === day;
+  const challenge = validDay(requestedDay) ? requestedDay : null;
+  const gameKey = challenge ? `2048.daily.v1.${challenge}` : storageKey;
+  const profileKey = '2048.profile.v1';
   const directions = ['left', 'right', 'up', 'down'];
 
   function slide(line) {
@@ -143,13 +171,23 @@ dialog button { margin:3px }
     return { board: next, index };
   }
 
-  function randomSpawn(board) {
-    return spawnTile(board, Math.random(), Math.random());
+  function spawnForTurn(board, turn) {
+    if (!challenge) return spawnTile(board, Math.random(), Math.random());
+
+    // The date and turn determine both rolls, including after undo or reload.
+    let seed = (Number(challenge.replaceAll('-', '')) ^ Math.imul(turn + 1, 0x9e3779b9)) >>> 0;
+    function roll() {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      return (seed >>> 0) / 4294967296;
+    }
+    return spawnTile(board, roll(), roll());
   }
 
   function freshGame() {
-    const first = randomSpawn(Array(size * size).fill(0));
-    return { board: randomSpawn(first.board).board, score: 0, continued: false };
+    const first = spawnForTurn(Array(size * size).fill(0), 0);
+    return { board: spawnForTurn(first.board, 1).board, score: 0, continued: false, turn: 0 };
   }
 
   function validFrame(frame) {
@@ -160,26 +198,56 @@ dialog button { margin:3px }
       typeof frame.continued === 'boolean';
   }
 
-  function load() {
+  function load(key) {
     try {
-      return JSON.parse(localStorage.getItem(storageKey)) ?? {};
+      return JSON.parse(localStorage.getItem(key)) ?? {};
     } catch {
       return {};
     }
   }
 
-  const saved = load();
+  const saved = load(gameKey);
+  const profile = load(profileKey);
+  const stats = {
+    played: profile.stats?.played ?? 0,
+    wins: profile.stats?.wins ?? 0,
+    highest: profile.stats?.highest ?? 0,
+    scores: profile.stats?.scores ?? {}
+  };
+  let counted = saved.counted === true;
+  let wonCounted = saved.wonCounted === true;
   let game = validFrame(saved.game) ? saved.game : freshGame();
   let history = validFrame(saved.game) && Array.isArray(saved.history)
     ? saved.history.filter(validFrame).slice(-historyLimit)
     : [];
   let best = Math.max(game.score, Number.isSafeInteger(saved.best) ? saved.best : 0);
   const themePreference = matchMedia('(prefers-color-scheme: dark)');
-  let theme = ['dark', 'light'].includes(saved.theme) ? saved.theme : null;
+  const storedTheme = profile.theme ?? load(storageKey).theme;
+  let theme = ['dark', 'light'].includes(storedTheme) ? storedTheme : null;
+
+  function updateStats() {
+    if (!counted) {
+      counted = true;
+      stats.played += 1;
+    }
+    const highest = Math.max(...game.board);
+    if (highest >= 2048 && !wonCounted) {
+      wonCounted = true;
+      stats.wins += 1;
+    }
+    stats.highest = Math.max(stats.highest, highest);
+    const day = utcDay();
+    stats.scores[day] = Math.max(stats.scores[day] ?? 0, game.score);
+    const cutoff = utcDay(new Date(Date.now() - 6 * 86400000));
+    for (const date of Object.keys(stats.scores)) {
+      if (date < cutoff) delete stats.scores[date];
+    }
+  }
 
   function save() {
     try {
-      localStorage.setItem(storageKey, JSON.stringify({ game, history, best, theme }));
+      localStorage.setItem(gameKey, JSON.stringify({ game, history, best, theme, counted, wonCounted }));
+      localStorage.setItem(profileKey, JSON.stringify({ stats, theme }));
     } catch {
       // The game remains playable when browser storage is blocked or full.
     }
@@ -189,6 +257,18 @@ dialog button { margin:3px }
   const board = element('board');
   const tiles = element('tiles');
   const dialog = element('result');
+  const statistics = element('statistics');
+  function dailyUrl(day) {
+    const url = new URL('./', location.href);
+    url.searchParams.set('daily', day);
+    return url.href;
+  }
+  element('daily').href = dailyUrl(utcDay());
+  element(challenge ? 'daily' : 'classic').setAttribute('aria-current', 'page');
+  if (challenge) {
+    element('daily-date').hidden = false;
+    element('daily-date').textContent = `Испытание за ${challenge.split('-').reverse().join('.')}`;
+  }
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   let animation = null;
 
@@ -273,20 +353,24 @@ dialog button { margin:3px }
   }
 
   function play(direction) {
-    if (dialog.open || (!game.continued && game.board.includes(2048))) return;
+    if (dialog.open || statistics.open || (!game.continued && game.board.includes(2048))) return;
     const transition = move(game.board, direction);
     if (!transition.changed) return;
     const previous = game;
-    const spawned = randomSpawn(transition.board);
+    const turn = previous.turn ?? 0;
+    const spawned = spawnForTurn(transition.board, turn + 2);
     history = [...history, previous].slice(-historyLimit);
-    game = { ...previous, board: spawned.board, score: previous.score + transition.points };
+    game = { ...previous, board: spawned.board, score: previous.score + transition.points, turn: turn + 1 };
     best = Math.max(best, game.score);
+    updateStats();
     save();
     render(previous.board, transition, spawned.index);
   }
 
   function restart() {
     history = [];
+    counted = false;
+    wonCounted = false;
     game = freshGame();
     save();
     render();
@@ -312,7 +396,7 @@ dialog button { margin:3px }
 
   document.addEventListener('keydown', event => {
     const direction = keys.get(event.code);
-    if (!direction || dialog.open || event.ctrlKey || event.altKey || event.metaKey) return;
+    if (!direction || dialog.open || statistics.open || event.ctrlKey || event.altKey || event.metaKey) return;
     event.preventDefault();
     play(direction);
   });
@@ -333,6 +417,43 @@ dialog button { margin:3px }
   });
   board.addEventListener('lostpointercapture', event => {
     if (touch?.id === event.pointerId) touch = null;
+  });
+
+  element('stats').addEventListener('click', () => {
+    const cutoff = utcDay(new Date(Date.now() - 6 * 86400000));
+    const weekly = Math.max(0, ...Object.entries(stats.scores)
+      .filter(([day]) => day >= cutoff).map(([, score]) => score));
+    const rows = [
+      ['Сыгранные партии', stats.played],
+      ['Победы', stats.wins],
+      ['Максимальная плитка', stats.highest],
+      ['Лучший счёт за 7 дней', weekly]
+    ];
+    element('stats-list').replaceChildren(...rows.flatMap(([label, value]) => {
+      const term = document.createElement('dt');
+      const detail = document.createElement('dd');
+      term.textContent = label;
+      detail.textContent = value;
+      return [term, detail];
+    }));
+    statistics.showModal();
+  });
+
+  element('share').addEventListener('click', async () => {
+    const url = challenge ? dailyUrl(challenge) : new URL('./', location.href).href;
+    const mode = challenge ? `Испытание 2048 за ${challenge.split('-').reverse().join('.')}` : '2048';
+    const text = `${mode}. Мой счёт: ${game.score}. Максимальная плитка: ${Math.max(...game.board)}.`;
+    const feedback = element('feedback');
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: '2048', text, url });
+        return;
+      }
+      await navigator.clipboard.writeText(`${text} ${url}`);
+      feedback.textContent = 'Результат и ссылка скопированы.';
+    } catch (error) {
+      if (error.name !== 'AbortError') feedback.textContent = `${text} ${url}`;
+    }
   });
 
   element('undo').addEventListener('click', undo);
